@@ -7,7 +7,6 @@ import random
 import os
 
 import websocket  # Requires: pip install websocket-client
-import requests    # Requires: pip install requests
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -80,13 +79,24 @@ def fuzz_websocket(url, num_requests, delay, payloads, timeout, origin=None):
         origin (str):  The origin header to set.
 
     Returns:
-        None
+        bool: True only when the connection succeeded, at least one
+        payload was sent, and the receive path ran without every
+        receive attempt erroring. False on connection failure or a
+        receive path that never read a response.
     """
     logging.info(f"Fuzzing WebSocket endpoint: {url}")
     logging.info(f"Number of requests: {num_requests}, Delay: {delay}s, Number of Payloads: {len(payloads)}")
 
+    sent = 0
+    receive_attempts = 0
+    receive_errors = 0
+    received = 0
+
     try:
         ws = websocket.create_connection(url, timeout=timeout, origin=origin) # Origin is passed for CORS testing
+        # websocket-client recv() takes no timeout argument; receive
+        # waiting is controlled through the socket timeout instead.
+        ws.settimeout(2)
 
         for i in range(num_requests):
             payload = random.choice(payloads)
@@ -94,14 +104,18 @@ def fuzz_websocket(url, num_requests, delay, payloads, timeout, origin=None):
 
             try:
                 ws.send(payload)
+                sent += 1
                 # Consider logging the response if needed
                 if len(payload) < 100:  #Only try to receive if sent payload small to avoid hanging the server
+                    receive_attempts += 1
                     try:
-                         result = ws.recv(timeout=2) #small timeout for receiving
+                         result = ws.recv()
+                         received += 1
                          logging.info(f"Received: {result}")
                     except websocket.WebSocketTimeoutException:
                         logging.info("No response received after sending the payload.")
                     except Exception as e:
+                        receive_errors += 1
                         logging.error(f"Error receiving data: {e}")
                 else:
                     logging.info(f"Payload larger than 100 chars, skipping receive.  Payload length: {len(payload)}")
@@ -117,12 +131,22 @@ def fuzz_websocket(url, num_requests, delay, payloads, timeout, origin=None):
             time.sleep(delay)
 
         ws.close()
+        if sent == 0:
+            logging.error("No payloads were sent; fuzzing did not run.")
+            return False
+        if receive_attempts > 0 and receive_errors == receive_attempts and received == 0:
+            logging.error("Every receive attempt failed; no response was ever read, so no fuzzing result can be claimed.")
+            return False
         logging.info("Fuzzing completed.")
+        logging.info(f"Sent: {sent}, Responses received: {received}, Receive errors: {receive_errors}")
+        return True
 
     except websocket.WebSocketException as e:
         logging.error(f"Failed to connect or communicate with WebSocket: {e}")
+        return False
     except Exception as e:
         logging.error(f"An unexpected error occurred: {e}")
+        return False
 
 
 def main():
@@ -168,7 +192,8 @@ def main():
 
 
     # Start fuzzing
-    fuzz_websocket(args.url, args.num_requests, args.delay, payloads, args.timeout, args.origin)
+    success = fuzz_websocket(args.url, args.num_requests, args.delay, payloads, args.timeout, args.origin)
+    sys.exit(0 if success else 1)
 
 
 if __name__ == "__main__":
