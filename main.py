@@ -56,6 +56,10 @@ def load_payloads_from_file(filename):
     """
     try:
         with open(filename, 'r') as f:
+            # Stripping every line removes payloads whose meaning is in their
+            # trailing whitespace, and blank lines survive as empty payloads,
+            # so a file of blank lines counts as loaded and the default set
+            # is not used as a fallback.
             payloads = [line.strip() for line in f]
         return payloads
     except FileNotFoundError:
@@ -96,9 +100,17 @@ def fuzz_websocket(url, num_requests, delay, payloads, timeout, origin=None):
         ws = websocket.create_connection(url, timeout=timeout, origin=origin) # Origin is passed for CORS testing
         # websocket-client recv() takes no timeout argument; receive
         # waiting is controlled through the socket timeout instead.
+        # This two second socket timeout replaces the connection timeout
+        # for everything after connect, sends included, and ignores the
+        # timeout argument entirely. A slow server drip feeding a reply is
+        # cut at two seconds whatever the operator passed in.
         ws.settimeout(2)
 
         for i in range(num_requests):
+            # Choice with replacement means num_requests is not a coverage
+            # promise: some payloads repeat and others are never sent, and
+            # because nothing seeds the choice, two runs against the same
+            # endpoint do not send the same traffic.
             payload = random.choice(payloads)
             logging.debug(f"Sending payload {i+1}/{num_requests}: {payload}")
 
@@ -106,6 +118,11 @@ def fuzz_websocket(url, num_requests, delay, payloads, timeout, origin=None):
                 ws.send(payload)
                 sent += 1
                 # Consider logging the response if needed
+                # The receive test is inverted against risk: the 1000 character
+                # payload, the one most likely to break a handler, is the one whose
+                # response I never wait for. And a timeout on receive counts as
+                # neither a response nor an error below, so a server that simply
+                # never answers still lets this run report success.
                 if len(payload) < 100:  #Only try to receive if sent payload small to avoid hanging the server
                     receive_attempts += 1
                     try:
@@ -122,6 +139,9 @@ def fuzz_websocket(url, num_requests, delay, payloads, timeout, origin=None):
 
             except websocket.WebSocketException as e:
                 logging.error(f"WebSocket error: {e}")
+                # Breaking here falls into the success arithmetic below: if even
+                # one payload was sent before the connection died, the run returns
+                # True and exits 0, with the unattempted requests counted nowhere.
                 break  # Stop fuzzing if a critical error occurs
 
             except Exception as e:
