@@ -6,7 +6,10 @@ import time
 import random
 import os
 
-import websocket  # Requires: pip install websocket-client
+try:
+    import websocket  # Requires: pip install websocket-client
+except ImportError:
+    websocket = None
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -99,12 +102,9 @@ def fuzz_websocket(url, num_requests, delay, payloads, timeout, origin=None):
     try:
         ws = websocket.create_connection(url, timeout=timeout, origin=origin) # Origin is passed for CORS testing
         # websocket-client recv() takes no timeout argument; receive
-        # waiting is controlled through the socket timeout instead.
-        # This two second socket timeout replaces the connection timeout
-        # for everything after connect, sends included, and ignores the
-        # timeout argument entirely. A slow server drip feeding a reply is
-        # cut at two seconds whatever the operator passed in.
-        ws.settimeout(2)
+        # waiting is controlled through the socket timeout instead, so
+        # the operator supplied timeout is applied here as well.
+        ws.settimeout(timeout)
 
         for i in range(num_requests):
             # Choice with replacement means num_requests is not a coverage
@@ -175,9 +175,17 @@ def main():
     """
     args = setup_argparse()
 
+    if websocket is None:
+        logging.error("websocket-client is not installed; install it from requirements.txt before fuzzing.")
+        sys.exit(1)
+
     # Configure logging based on arguments
     if args.log_file:
-        file_handler = logging.FileHandler(args.log_file)
+        try:
+            file_handler = logging.FileHandler(args.log_file)
+        except OSError as e:
+            logging.error(f"Could not open log file {args.log_file}: {e}")
+            sys.exit(1)
         file_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
         logging.getLogger().addHandler(file_handler)
 
@@ -201,12 +209,16 @@ def main():
         logging.error("Delay must be a non-negative number.")
         sys.exit(1)
 
+    if args.timeout <= 0:
+        logging.error("Timeout must be a positive number of seconds.")
+        sys.exit(1)
+
     # Load payloads
     if args.payload_file:
         payloads = load_payloads_from_file(args.payload_file)
         if not payloads:
-            logging.warning("No payloads loaded from file. Using default payloads.")
-            payloads = FUZZ_PAYLOADS #Fallback to default payloads.
+            logging.error(f"No payloads loaded from file {args.payload_file}; exiting instead of silently using the default payloads.")
+            sys.exit(1)
     else:
         payloads = FUZZ_PAYLOADS
 
